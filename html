@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>خريطة قصص المكان</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body { margin:0; font-family: Arial, sans-serif; }
+    #map { height: 100vh; width: 100%; }
+
+    .form {
+      position: absolute; top: 12px; right: 12px;
+      background: #fff; padding: 12px; z-index: 1000;
+      width: 270px; border-radius: 10px;
+      box-shadow: 0 6px 20px rgba(0,0,0,.15);
+    }
+    .form h3 { margin: 0 0 10px; font-size: 18px; }
+    label { display:block; font-size: 13px; margin: 6px 0 4px; color:#333; }
+
+    input, textarea, select, button {
+      width: 100%; margin-bottom: 8px; padding: 9px;
+      border: 1px solid #ddd; border-radius: 8px;
+      box-sizing: border-box; font-size: 14px; background: #fff;
+    }
+    textarea { min-height: 80px; resize: vertical; }
+    button { cursor:pointer; border:none; background:#2563eb; color:#fff; font-weight:700; padding:10px; }
+    button:disabled { opacity:.65; cursor:not-allowed; }
+    #status { margin: 6px 0 0; font-size: 13px; color:#111; }
+  </style>
+</head>
+
+<body>
+  <div class="form" id="formBox">
+    <h3>أضف قصتك</h3>
+
+    <input id="name" placeholder="الاسم (اختياري)">
+    <input id="title" placeholder="عنوان القصة" required>
+    <textarea id="story" placeholder="اكتب القصة هنا..." required></textarea>
+
+    <select id="category">
+      <option value="ذكرى">ذكرى</option>
+      <option value="حياة">حياة</option>
+      <option value="حكاية">حكاية</option>
+      <option value="مشكلة">مشكلة</option>
+      <option value="اقتراح">اقتراح</option>
+    </select>
+
+    <label for="photo">شاركي صورة (اختياري)</label>
+    <input type="file" id="photo" accept="image/*">
+
+    <button id="sendBtn" type="button">إرسال</button>
+    <p id="status"></p>
+  </div>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // ✅ غيّري هذا لرابط Web App النهائي تبع Apps Script (Deploy > Web app > URL)
+    const API_URL = "https://script.google.com/macros/s/AKfycby1q-bxf_EwsrNyBp6XM4ZAMJ_-rbfvy7FX1YZDQI4JfR14vkAzj3RH3wU27fgaw6qR/exec";
+
+    // ✅ إعدادات Cloudinary (حسب اللي بعتيتيه)
+    const CLOUD_NAME = "dsfidrhua";
+    const UPLOAD_PRESET = "jenin_camp_stories";
+    const CLOUDINARY_FOLDER = "jenin_stories"; // اختياري، نفس الفولدر اللي بدك
+
+    const elName = document.getElementById("name");
+    const elTitle = document.getElementById("title");
+    const elStory = document.getElementById("story");
+    const elCategory = document.getElementById("category");
+    const elPhoto = document.getElementById("photo");
+    const elStatus = document.getElementById("status");
+    const elSendBtn = document.getElementById("sendBtn");
+
+    const JENIN_CAMP_CENTER = [32.4632, 35.3015];
+    const START_ZOOM = 15;
+
+    const map = L.map('map', { zoomControl: true }).setView(JENIN_CAMP_CENTER, START_ZOOM);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    const bounds = L.latLngBounds([32.455, 35.288], [32.466, 35.302]);
+    map.setMaxBounds(bounds);
+    map.on('drag', () => map.panInsideBounds(bounds, { animate:false }));
+
+    let selectedLatLng = null;
+    let tempMarker = null;
+
+    map.on('click', (e) => {
+      selectedLatLng = e.latlng;
+      if (tempMarker) map.removeLayer(tempMarker);
+      tempMarker = L.marker(selectedLatLng).addTo(map)
+        .bindPopup("✅ تم اختيار الموقع").openPopup();
+    });
+
+    elSendBtn.addEventListener("click", submitStory);
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function uploadToCloudinary(file) {
+      const endpoint = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("upload_preset", UPLOAD_PRESET);
+      fd.append("folder", CLOUDINARY_FOLDER);
+
+      const res = await fetch(endpoint, { method: "POST", body: fd });
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        const msg = data?.error?.message || "Cloudinary upload failed";
+        throw new Error(msg);
+      }
+
+      // secure_url = رابط HTTPS جاهز
+      return {
+        url: data.secure_url || data.url || "",
+        public_id: data.public_id || "",
+        bytes: data.bytes || file.size || 0,
+        original_filename: data.original_filename || file.name || ""
+      };
+    }
+
+    async function submitStory() {
+      try {
+        if (!selectedLatLng) { alert("اختاري موقع على الخريطة أولاً"); return; }
+
+        const title = (elTitle.value || "").trim();
+        const story = (elStory.value || "").trim();
+        if (!title || !story) { alert("اكتبي عنوان + القصة قبل الإرسال"); return; }
+
+        elSendBtn.disabled = true;
+        elStatus.textContent = "جاري الحفظ...";
+
+        // 1) ارفع الصورة على Cloudinary (إن وجدت)
+        let photo = null;
+        const file = elPhoto.files && elPhoto.files[0];
+        if (file) {
+          elStatus.textContent = "جاري رفع الصورة...";
+          const up = await uploadToCloudinary(file);
+          photo = up; // {url, public_id, bytes, original_filename}
+        }
+
+        // 2) ابعث البيانات لـ Apps Script (بدون base64 وبدون Drive)
+        elStatus.textContent = "جاري حفظ البيانات...";
+        const payload = {
+          name: (elName.value || "").trim(),
+          title, story,
+          category: elCategory.value,
+          lat: selectedLatLng.lat,
+          lng: selectedLatLng.lng,
+          photo // null أو بيانات الرابط
+        };
+
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify(payload)
+        });
+
+        const text = await res.text();
+        let resp;
+        try { resp = JSON.parse(text); }
+        catch { resp = { ok:false, error:"Response not JSON", raw:text }; }
+
+        if (!resp.ok) {
+          elSendBtn.disabled = false;
+          elStatus.textContent = "فشل الحفظ: " + (resp.error || resp.raw || "غير معروف");
+          return;
+        }
+
+        // ✅ مهم: ما نعرض الصورة للناس — بس نعرض القصة بدون صورة
+        L.marker(selectedLatLng).addTo(map)
+          .bindPopup(`<b>${escapeHtml(title)}</b><br>${escapeHtml(story)}`);
+
+        document.body.innerHTML = `
+          <div style="height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;font-family:Arial">
+            <div>
+              <div style="font-size:34px;font-weight:800;">شكراً لوقتك</div>
+              <div style="margin-top:10px;color:#444;">تم الحفظ ✅</div>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        console.error(err);
+        elSendBtn.disabled = false;
+        elStatus.textContent = "فشل الحفظ: " + (err?.message || "غير معروف");
+      }
+    }
+  </script>
+</body>
+</html>
